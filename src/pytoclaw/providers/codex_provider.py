@@ -81,11 +81,7 @@ class CodexProvider(LLMProvider):
         if tools:
             body["tools"] = _convert_tools(tools)
 
-        if "temperature" in opts:
-            body["temperature"] = opts["temperature"]
-
-        if "max_tokens" in opts:
-            body["max_output_tokens"] = opts["max_tokens"]
+        # Note: Codex API does not support temperature or max_tokens parameters
 
         headers = self._build_headers()
         headers["Accept"] = "text/event-stream"
