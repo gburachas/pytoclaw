@@ -44,6 +44,10 @@ def create_provider(
     elif any(model_id.startswith(p) for p in COPILOT_PREFIXES):
         raise NotImplementedError("GitHub Copilot provider not yet implemented")
     else:
+        # Check if we have OAuth credentials for OpenAI Codex
+        codex = _try_create_codex(model_id, config)
+        if codex:
+            return codex
         return _create_openai(model_id, api_key, api_base, config.providers)
 
 
@@ -107,3 +111,22 @@ def _create_anthropic(
         api_base = api_base or providers.anthropic.api_base or ""
 
     return AnthropicProvider(model=actual_model, api_key=api_key, api_base=api_base)
+
+
+def _try_create_codex(model_id: str, config: Config) -> LLMProvider | None:
+    """Try to create a Codex provider using stored OAuth credentials."""
+    try:
+        from pytoclaw.auth.credentials import CredentialStore
+        store = CredentialStore(config.config_dir)
+        cred = store.get("openai-codex")
+        if cred is None or cred.auth_type != "oauth":
+            return None
+
+        from pytoclaw.providers.codex_provider import CodexProvider
+        return CodexProvider(
+            access_token=cred.access_token,
+            account_id=cred.account_id,
+            default_model=model_id,
+        )
+    except Exception:
+        return None

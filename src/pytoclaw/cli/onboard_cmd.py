@@ -77,7 +77,27 @@ def run_onboard() -> None:
     )
 
     api_key = ""
-    if provider != "ollama":
+    oauth_creds = None
+    if provider == "openai":
+        auth_method = Prompt.ask(
+            "Authentication method",
+            choices=["api_key", "browser_login"],
+            default="browser_login",
+        )
+        if auth_method == "browser_login":
+            console.print("\n[bold]Starting OpenAI OAuth login...[/bold]")
+            console.print("[dim]This uses your ChatGPT Pro/Plus subscription (separate from API billing).[/dim]\n")
+            import asyncio
+            from pytoclaw.auth.openai_oauth import login_openai_oauth
+            oauth_creds = asyncio.get_event_loop().run_until_complete(login_openai_oauth())
+            if oauth_creds:
+                console.print("[green]OAuth login successful![/green]")
+            else:
+                console.print("[red]OAuth login failed. Falling back to API key.[/red]")
+                api_key = Prompt.ask("OpenAI API key")
+        else:
+            api_key = Prompt.ask("OpenAI API key")
+    elif provider != "ollama":
         api_key = Prompt.ask(f"{provider.title()} API key")
 
     default_model = _default_model(provider)
@@ -95,7 +115,14 @@ def run_onboard() -> None:
     cfg.agents.defaults.model = model
 
     if provider == "openai":
-        cfg.providers.openai.api_key = api_key
+        if oauth_creds:
+            # Store OAuth credentials securely
+            from pytoclaw.auth.credentials import CredentialStore
+            cred_store = CredentialStore(str(config_dir))
+            cred_store.store_oauth("openai-codex", oauth_creds)
+            # Don't store API key in config — it comes from OAuth
+        else:
+            cfg.providers.openai.api_key = api_key
     elif provider == "anthropic":
         cfg.providers.anthropic.api_key = api_key
     elif provider == "openrouter":
