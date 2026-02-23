@@ -2,6 +2,9 @@
 
 Uses the ChatGPT backend API (https://chatgpt.com/backend-api/codex/responses)
 with OAuth bearer tokens from ChatGPT Pro/Plus subscriptions.
+
+The Codex API requires streaming (stream=true). We consume the SSE stream
+and accumulate the full response.
 """
 
 from __future__ import annotations
@@ -9,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import platform
+import time
 from typing import Any
 
 import httpx
@@ -26,6 +30,8 @@ from pytoclaw.protocols import LLMProvider
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://chatgpt.com/backend-api"
+MAX_RETRIES = 3
+BASE_DELAY_S = 1.0
 
 
 class CodexProvider(LLMProvider):
@@ -63,7 +69,7 @@ class CodexProvider(LLMProvider):
         body: dict[str, Any] = {
             "model": model or self._default_model,
             "store": False,
-            "stream": False,
+            "stream": True,
             "input": input_msgs,
             "tool_choice": "auto",
             "parallel_tool_calls": True,
@@ -82,38 +88,143 @@ class CodexProvider(LLMProvider):
             body["max_output_tokens"] = opts["max_tokens"]
 
         headers = self._build_headers()
+        headers["Accept"] = "text/event-stream"
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(url, json=body, headers=headers)
+        # Retry loop for transient errors
+        last_error: Exception | None = None
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                return await self._stream_request(url, body, headers)
+            except _RetryableError as e:
+                last_error = e
+                if attempt < MAX_RETRIES:
+                    delay = BASE_DELAY_S * (2 ** attempt)
+                    logger.warning("Codex request failed (attempt %d), retrying in %.1fs: %s", attempt + 1, delay, e)
+                    import asyncio
+                    await asyncio.sleep(delay)
+                    continue
+                raise RuntimeError(str(e)) from e
+            except RuntimeError:
+                raise
 
-            if resp.status_code != 200:
-                error_text = resp.text
-                # Parse friendly error messages
-                try:
-                    err_data = resp.json()
-                    err = err_data.get("error", {})
-                    code = err.get("code", "")
-                    if "usage_limit" in code or resp.status_code == 429:
-                        plan = err.get("plan_type", "")
-                        resets = err.get("resets_at")
-                        msg = f"ChatGPT usage limit reached"
-                        if plan:
-                            msg += f" ({plan} plan)"
-                        if resets:
-                            import time
-                            mins = max(0, round((resets * 1000 - time.time() * 1000) / 60000))
-                            msg += f". Try again in ~{mins} min"
-                        raise RuntimeError(msg)
-                except (json.JSONDecodeError, RuntimeError):
-                    if isinstance(resp.status_code, int) and resp.status_code == 429:
-                        raise
-                raise RuntimeError(
-                    f"Codex API error {resp.status_code}: {error_text[:500]}"
-                )
+        raise RuntimeError(str(last_error) if last_error else "Codex request failed")
 
-            data = resp.json()
+    async def _stream_request(
+        self,
+        url: str,
+        body: dict[str, Any],
+        headers: dict[str, str],
+    ) -> LLMResponse:
+        """Send a streaming request and accumulate the SSE response."""
+        content_parts: list[str] = []
+        tool_calls_by_idx: dict[str, dict[str, str]] = {}
+        usage_data: dict[str, int] = {}
+        stop_reason = "stop"
 
-        return _parse_response(data)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
+            async with client.stream("POST", url, json=body, headers=headers) as resp:
+                if resp.status_code != 200:
+                    error_text = await resp.aread()
+                    error_str = error_text.decode(errors="replace")
+                    if _is_retryable(resp.status_code, error_str):
+                        raise _RetryableError(f"Codex API error {resp.status_code}: {error_str[:300]}")
+                    _raise_friendly_error(resp.status_code, error_str)
+
+                buffer = ""
+                async for chunk in resp.aiter_text():
+                    buffer += chunk
+
+                    while "\n\n" in buffer:
+                        event_text, buffer = buffer.split("\n\n", 1)
+                        data_lines = [
+                            line[5:].strip()
+                            for line in event_text.split("\n")
+                            if line.startswith("data:")
+                        ]
+                        if not data_lines:
+                            continue
+                        data_str = "\n".join(data_lines).strip()
+                        if not data_str or data_str == "[DONE]":
+                            continue
+
+                        try:
+                            event = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+
+                        event_type = event.get("type", "")
+
+                        # Handle errors from the stream
+                        if event_type == "error":
+                            msg = event.get("message", event.get("code", "Unknown error"))
+                            raise RuntimeError(f"Codex stream error: {msg}")
+
+                        if event_type == "response.failed":
+                            err = event.get("response", {}).get("error", {})
+                            msg = err.get("message", "Response failed")
+                            raise RuntimeError(msg)
+
+                        # Text content deltas
+                        if event_type == "response.output_text.delta":
+                            delta = event.get("delta", "")
+                            if delta:
+                                content_parts.append(delta)
+
+                        # Function call arguments delta
+                        elif event_type == "response.function_call_arguments.delta":
+                            item_id = event.get("item_id", "")
+                            delta = event.get("delta", "")
+                            if item_id not in tool_calls_by_idx:
+                                tool_calls_by_idx[item_id] = {"id": item_id, "name": "", "arguments": ""}
+                            tool_calls_by_idx[item_id]["arguments"] += delta
+
+                        # Output item added (captures function call name)
+                        elif event_type == "response.output_item.added":
+                            item = event.get("item", {})
+                            if item.get("type") == "function_call":
+                                item_id = item.get("id", item.get("call_id", ""))
+                                tool_calls_by_idx[item_id] = {
+                                    "id": item.get("call_id", item_id),
+                                    "name": item.get("name", ""),
+                                    "arguments": "",
+                                }
+
+                        # Response completed — extract usage
+                        elif event_type in ("response.completed", "response.done"):
+                            response_obj = event.get("response", {})
+                            usage = response_obj.get("usage", {})
+                            if usage:
+                                usage_data["input"] = usage.get("input_tokens", 0)
+                                usage_data["output"] = usage.get("output_tokens", 0)
+                            status = response_obj.get("status", "completed")
+                            if status != "completed":
+                                stop_reason = status
+
+        # Build final response
+        content = "".join(content_parts)
+        tool_call_list = []
+        for tc_data in tool_calls_by_idx.values():
+            tool_call_list.append(ToolCall(
+                id=tc_data["id"],
+                function=FunctionCall(
+                    name=tc_data["name"],
+                    arguments=tc_data["arguments"] or "{}",
+                ),
+            ))
+
+        usage = UsageInfo(
+            prompt_tokens=usage_data.get("input", 0),
+            completion_tokens=usage_data.get("output", 0),
+        ) if usage_data else None
+
+        finish_reason = "tool_calls" if tool_call_list else stop_reason
+
+        return LLMResponse(
+            content=content,
+            tool_calls=tool_call_list if tool_call_list else None,
+            usage=usage,
+            finish_reason=finish_reason,
+        )
 
     def _build_headers(self) -> dict[str, str]:
         ua = f"pytoclaw ({platform.system()} {platform.release()}; {platform.machine()})"
@@ -124,12 +235,45 @@ class CodexProvider(LLMProvider):
             "originator": "pytoclaw",
             "User-Agent": ua,
             "Content-Type": "application/json",
-            "Accept": "application/json",
         }
 
 
+class _RetryableError(Exception):
+    """Raised for transient errors that should be retried."""
+    pass
+
+
+def _is_retryable(status: int, error_text: str) -> bool:
+    if status in (429, 500, 502, 503, 504):
+        return True
+    import re
+    return bool(re.search(r"rate.?limit|overloaded|service.?unavailable|upstream.?connect", error_text, re.IGNORECASE))
+
+
+def _raise_friendly_error(status: int, error_text: str) -> None:
+    """Parse error response and raise a friendly RuntimeError."""
+    try:
+        data = json.loads(error_text)
+        err = data.get("error", {})
+        code = err.get("code", "")
+        if "usage_limit" in code or status == 429:
+            plan = err.get("plan_type", "")
+            resets = err.get("resets_at")
+            msg = "ChatGPT usage limit reached"
+            if plan:
+                msg += f" ({plan} plan)"
+            if resets:
+                mins = max(0, round((resets * 1000 - time.time() * 1000) / 60000))
+                msg += f". Try again in ~{mins} min"
+            raise RuntimeError(msg)
+        if err.get("message"):
+            raise RuntimeError(f"Codex API error: {err['message']}")
+    except (json.JSONDecodeError, RuntimeError):
+        raise
+    raise RuntimeError(f"Codex API error {status}: {error_text[:500]}")
+
+
 def _extract_system_prompt(messages: list[Message]) -> str:
-    """Extract system message content."""
     for msg in messages:
         if msg.role == "system":
             return msg.content
@@ -141,7 +285,7 @@ def _convert_messages(messages: list[Message]) -> list[dict[str, Any]]:
     result = []
     for msg in messages:
         if msg.role == "system":
-            continue  # System goes to instructions field
+            continue
 
         if msg.role == "user":
             result.append({"role": "user", "content": msg.content})
@@ -176,7 +320,6 @@ def _convert_messages(messages: list[Message]) -> list[dict[str, Any]]:
 
 
 def _convert_tools(tools: list[ToolDefinition]) -> list[dict[str, Any]]:
-    """Convert tool definitions to Responses API format."""
     result = []
     for tool in tools:
         fn = tool.function
@@ -187,46 +330,3 @@ def _convert_tools(tools: list[ToolDefinition]) -> list[dict[str, Any]]:
             "parameters": fn.parameters,
         })
     return result
-
-
-def _parse_response(data: dict[str, Any]) -> LLMResponse:
-    """Parse Responses API output into LLMResponse."""
-    output = data.get("output", [])
-    content_parts = []
-    tool_calls = []
-
-    for item in output:
-        item_type = item.get("type", "")
-
-        if item_type == "message":
-            for block in item.get("content", []):
-                if block.get("type") == "output_text":
-                    content_parts.append(block.get("text", ""))
-
-        elif item_type == "function_call":
-            tool_calls.append(ToolCall(
-                id=item.get("call_id", item.get("id", "")),
-                function=FunctionCall(
-                    name=item.get("name", ""),
-                    arguments=item.get("arguments", "{}"),
-                ),
-            ))
-
-    content = "".join(content_parts)
-
-    # Parse usage
-    usage_data = data.get("usage", {})
-    usage = UsageInfo(
-        prompt_tokens=usage_data.get("input_tokens", 0),
-        completion_tokens=usage_data.get("output_tokens", 0),
-    ) if usage_data else None
-
-    status = data.get("status", "completed")
-    finish_reason = "tool_calls" if tool_calls else ("stop" if status == "completed" else status)
-
-    return LLMResponse(
-        content=content,
-        tool_calls=tool_calls if tool_calls else None,
-        usage=usage,
-        finish_reason=finish_reason,
-    )
