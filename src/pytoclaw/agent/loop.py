@@ -138,7 +138,21 @@ class AgentLoop:
         # LLM iteration loop
         response_text = ""
         for iteration in range(agent.max_iterations):
-            response = await self._call_llm(agent, messages)
+            try:
+                response = await self._call_llm(agent, messages)
+            except Exception as e:
+                error_msg = str(e)
+                # Extract useful message from provider errors
+                if "404" in error_msg or "model" in error_msg.lower():
+                    response_text = (
+                        f"Model error: {error_msg}\n\n"
+                        f"Current model: {agent.model}. "
+                        f"Use /model to check, or re-run `pytoclaw onboard` to reconfigure."
+                    )
+                else:
+                    response_text = f"LLM provider error: {error_msg}"
+                logger.error("LLM call failed: %s", error_msg)
+                break
 
             # If no tool calls, we have our final response
             if not response.tool_calls:
