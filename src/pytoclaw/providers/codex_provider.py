@@ -276,9 +276,22 @@ def _extract_system_prompt(messages: list[Message]) -> str:
     return ""
 
 
+def _ensure_fc_prefix(call_id: str) -> str:
+    """Ensure a function call ID has the 'fc_' prefix required by the Codex API."""
+    if call_id.startswith("fc_"):
+        return call_id
+    # Strip any existing prefix (e.g. "call_") and add "fc_"
+    if call_id.startswith("call_"):
+        return "fc_" + call_id[5:]
+    return "fc_" + call_id
+
+
 def _convert_messages(messages: list[Message]) -> list[dict[str, Any]]:
     """Convert internal messages to Responses API input format."""
     result = []
+    # Map original IDs → fc_ IDs for consistency between calls and outputs
+    id_map: dict[str, str] = {}
+
     for msg in messages:
         if msg.role == "system":
             continue
@@ -298,18 +311,22 @@ def _convert_messages(messages: list[Message]) -> list[dict[str, Any]]:
                 for tc in msg.tool_calls:
                     fn = tc.function
                     if fn:
+                        fc_id = _ensure_fc_prefix(tc.id)
+                        id_map[tc.id] = fc_id
                         result.append({
                             "type": "function_call",
-                            "id": tc.id,
-                            "call_id": tc.id,
+                            "id": fc_id,
+                            "call_id": fc_id,
                             "name": fn.name,
                             "arguments": fn.arguments or "{}",
                         })
 
         elif msg.role == "tool":
+            original_id = msg.tool_call_id or ""
+            fc_id = id_map.get(original_id, _ensure_fc_prefix(original_id))
             result.append({
                 "type": "function_call_output",
-                "call_id": msg.tool_call_id or "",
+                "call_id": fc_id,
                 "output": msg.content,
             })
 
