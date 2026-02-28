@@ -16,22 +16,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: uv sync --extra dev
 
       - name: Lint
-        run: ruff check src/ tests/
+        run: uv run ruff check src/ tests/
 
       - name: Type check
-        run: mypy src/pyclaw/ --ignore-missing-imports
+        run: uv run mypy src/pyclaw/ --ignore-missing-imports
 
       - name: Test
-        run: pytest tests/ -v --cov=pyclaw --cov-report=term-missing
+        run: uv run pytest tests/ -v --cov=pyclaw --cov-report=term-missing
 
   docker:
     runs-on: ubuntu-latest
