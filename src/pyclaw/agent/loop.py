@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from pyclaw.agent.instance import AgentInstance
 from pyclaw.agent.registry import AgentRegistry
@@ -20,9 +20,13 @@ from pyclaw.models import (
     RouteInput,
     ToolCall,
 )
+from pyclaw.providers.fallback import FallbackChain
 from pyclaw.protocols import LLMProvider
 
 logger = logging.getLogger(__name__)
+
+# Type for streaming chunk callbacks
+StreamCallback = Callable[[str], Any]
 
 
 @dataclass
@@ -52,6 +56,14 @@ class AgentLoop:
         self._registry = AgentRegistry(config, provider)
         self._running = False
         self._summarize_threshold = 20  # messages before summarization
+        self._on_stream: StreamCallback | None = None
+        self._fallback_chain = FallbackChain(
+            {"primary": provider, "fallback": provider}
+        )
+
+    def set_stream_callback(self, callback: StreamCallback | None) -> None:
+        """Set a callback for streaming text output. Pass None to disable."""
+        self._on_stream = callback
 
     async def run(self) -> None:
         """Run the main message processing loop."""
@@ -206,12 +218,27 @@ class AgentLoop:
         return response_text
 
     async def _call_llm(self, agent: AgentInstance, messages: list[Message]) -> LLMResponse:
-        """Call the LLM provider."""
+        """Call the LLM provider with fallback chain and optional streaming."""
         tool_defs = agent.tools.get_definitions()
         options: dict[str, Any] = {
             "max_tokens": agent.max_tokens,
             "temperature": agent.temperature,
         }
+
+        # Use fallback chain if agent has fallback candidates
+        if len(agent.candidates) > 1:
+            response, attempts = await self._fallback_chain.execute(
+                agent.candidates, messages, tool_defs, options
+            )
+            return response
+
+        # Single provider path — use streaming if callback set
+        if self._on_stream and hasattr(agent.provider, "stream_chat"):
+            return await agent.provider.stream_chat(
+                messages, tool_defs, agent.model, options,
+                on_chunk=self._on_stream,
+            )
+
         return await agent.provider.chat(messages, tool_defs, agent.model, options)
 
     async def _maybe_summarize(self, agent: AgentInstance, session_key: str) -> None:

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from openai import AsyncOpenAI
 
@@ -59,6 +60,42 @@ class OpenAIProvider(BaseProvider):
 
         response = await self._client.chat.completions.create(**kwargs)
         return _from_openai_response(response)
+
+    async def stream_chat(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition],
+        model: str,
+        options: dict[str, Any] | None = None,
+        on_chunk: "Callable[[str], Any] | None" = None,
+    ) -> LLMResponse:
+        """Streaming chat — calls on_chunk(text) for each content delta."""
+        from pyclaw.providers.streaming import stream_openai_response
+
+        opts = options or {}
+        model = model or self._model
+        oai_messages = _to_openai_messages(messages)
+
+        oai_tools = [_to_openai_tool(t) for t in tools] if tools else None
+
+        kwargs: dict[str, Any] = {}
+        if "max_tokens" in opts:
+            kwargs["max_tokens"] = opts["max_tokens"]
+        if "temperature" in opts:
+            kwargs["temperature"] = opts["temperature"]
+
+        # The streaming function creates its own kwargs internally,
+        # but we need to pass extra options. Patch them onto the client call.
+        client_kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": oai_messages,
+            "stream": True,
+        }
+        if oai_tools:
+            client_kwargs["tools"] = oai_tools
+        client_kwargs.update(kwargs)
+
+        return await _stream_openai_raw(self._client, client_kwargs, on_chunk)
 
 
 def _to_openai_messages(messages: list[Message]) -> list[dict[str, Any]]:
@@ -134,4 +171,59 @@ def _from_openai_response(response: Any) -> LLMResponse:
         tool_calls=tool_calls,
         finish_reason=choice.finish_reason or "",
         usage=usage,
+    )
+
+
+async def _stream_openai_raw(
+    client: Any,
+    kwargs: dict[str, Any],
+    on_chunk: Callable[[str], Any] | None = None,
+) -> LLMResponse:
+    """Low-level OpenAI streaming that accumulates content and tool calls."""
+    content_parts: list[str] = []
+    tool_calls_by_idx: dict[int, dict[str, str]] = {}
+
+    stream = await client.chat.completions.create(**kwargs)
+    async for chunk in stream:
+        delta = chunk.choices[0].delta if chunk.choices else None
+        if delta is None:
+            continue
+
+        if delta.content:
+            content_parts.append(delta.content)
+            if on_chunk:
+                try:
+                    result = on_chunk(delta.content)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:
+                    pass
+
+        if delta.tool_calls:
+            for tc in delta.tool_calls:
+                idx = tc.index
+                if idx not in tool_calls_by_idx:
+                    tool_calls_by_idx[idx] = {"id": "", "name": "", "arguments": ""}
+                if tc.id:
+                    tool_calls_by_idx[idx]["id"] = tc.id
+                if tc.function and tc.function.name:
+                    tool_calls_by_idx[idx]["name"] = tc.function.name
+                if tc.function and tc.function.arguments:
+                    tool_calls_by_idx[idx]["arguments"] += tc.function.arguments
+
+    content = "".join(content_parts)
+    tool_calls = []
+    for idx in sorted(tool_calls_by_idx):
+        tc_data = tool_calls_by_idx[idx]
+        tool_calls.append(ToolCall(
+            id=tc_data["id"],
+            function=FunctionCall(name=tc_data["name"], arguments=tc_data["arguments"]),
+            name=tc_data["name"],
+            arguments=json.loads(tc_data["arguments"]) if tc_data["arguments"] else {},
+        ))
+
+    return LLMResponse(
+        content=content,
+        tool_calls=tool_calls,
+        finish_reason="tool_calls" if tool_calls else "stop",
     )

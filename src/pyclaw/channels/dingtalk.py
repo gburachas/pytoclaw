@@ -1,8 +1,7 @@
-"""DingTalk channel adapter."""
+"""DingTalk channel adapter — not yet implemented."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -12,34 +11,27 @@ from pyclaw.models import OutboundMessage
 
 logger = logging.getLogger(__name__)
 
+_NOT_IMPLEMENTED_MSG = (
+    "DingTalk channel is not yet fully implemented. "
+    "Incoming messages will not be received. "
+    "See https://github.com/gburachas/pyclaw/issues for status."
+)
+
 
 class DingTalkChannel(BaseChannel):
-    """DingTalk bot channel via Stream SDK."""
+    """DingTalk bot channel — stub awaiting Stream SDK integration."""
 
     def __init__(self, config: Any, bus: MessageBus):
         super().__init__("dingtalk", config, bus, getattr(config, "allow_from", []))
         self._client_id = getattr(config, "client_id", "")
         self._client_secret = getattr(config, "client_secret", "")
-        self._session_webhooks: dict[str, str] = {}
-        self._task: asyncio.Task | None = None
 
     async def start(self) -> None:
-        # DingTalk Stream SDK integration would go here
-        # For now, stub that logs readiness
+        logger.warning(_NOT_IMPLEMENTED_MSG)
         self._running = True
-        logger.info("DingTalk channel started (client_id: %s...)", self._client_id[:8])
 
     async def stop(self) -> None:
         self._running = False
-        if self._task:
-            self._task.cancel()
 
     async def send(self, msg: OutboundMessage) -> None:
-        webhook = self._session_webhooks.get(msg.chat_id)
-        if webhook:
-            import httpx
-            async with httpx.AsyncClient() as client:
-                await client.post(webhook, json={
-                    "msgtype": "markdown",
-                    "markdown": {"title": "Reply", "text": msg.content},
-                })
+        logger.warning("DingTalk send not implemented — message dropped: %s", msg.content[:50])

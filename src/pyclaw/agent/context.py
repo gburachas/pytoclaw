@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pyclaw.memory.store import MemoryStore
 from pyclaw.models import Message
 from pyclaw.tools.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from pyclaw.skills.loader import SkillsLoader
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +23,20 @@ class ContextBuilder:
         self._workspace = Path(workspace).expanduser().resolve()
         self._memory = MemoryStore(workspace)
         self._tools: ToolRegistry | None = None
+        self._skills_loader: SkillsLoader | None = None
+        self._skills_filter: list[str] | None = None
 
     def set_tools_registry(self, registry: ToolRegistry) -> None:
         self._tools = registry
+
+    def set_skills_loader(
+        self,
+        loader: SkillsLoader,
+        filter_names: list[str] | None = None,
+    ) -> None:
+        """Configure the skills loader for progressive disclosure."""
+        self._skills_loader = loader
+        self._skills_filter = filter_names
 
     def build_system_prompt(self) -> str:
         """Assemble system prompt from workspace files + tools + memory."""
@@ -95,7 +110,21 @@ class ContextBuilder:
         return "\n\n".join(parts)
 
     def _load_skills(self) -> str:
-        """Load active skill definitions from workspace/skills/."""
+        """Load skills using progressive disclosure via SkillsLoader.
+
+        If a SkillsLoader is configured, uses XML summary format.
+        Falls back to reading workspace/skills/ directly for backward compatibility.
+        """
+        if self._skills_loader is not None:
+            summary = self._skills_loader.build_skills_summary(self._skills_filter)
+            if summary:
+                return (
+                    "To use a skill, read its full SKILL.md using the "
+                    "read_file tool at the location shown.\n\n" + summary
+                )
+            return ""
+
+        # Fallback: read skills directly from workspace.
         skills_dir = self._workspace / "skills"
         if not skills_dir.exists():
             return ""

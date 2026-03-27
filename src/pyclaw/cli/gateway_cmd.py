@@ -120,6 +120,10 @@ def _init_channels(cfg: Any, bus: "MessageBus", mgr: "ChannelManager") -> None:
         from pyclaw.channels.slack_ch import SlackChannel
         mgr.add_channel(SlackChannel(cfg.channels.slack, bus))
 
+    if cfg.channels.whatsapp.enabled and cfg.channels.whatsapp.bridge_url:
+        from pyclaw.channels.whatsapp import WhatsAppChannel
+        mgr.add_channel(WhatsAppChannel(cfg.channels.whatsapp, bus))
+
 
 async def _dispatch_outbound(bus: "MessageBus", mgr: "ChannelManager") -> None:
     """Route outbound messages to the correct channel."""

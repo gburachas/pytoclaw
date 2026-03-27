@@ -23,6 +23,7 @@ from pyclaw.tools.file_tools import (
     WriteFileTool,
 )
 from pyclaw.tools.message_tool import EchoTool
+from pyclaw.tools.spawn_tool import SpawnTool
 from pyclaw.tools.web_tools import WebFetchTool, WebSearchTool
 
 logger = logging.getLogger(__name__)
@@ -46,13 +47,26 @@ async def run_agent(
     agent = loop._registry.get_default_agent()
     _register_tools(agent, cfg)
 
+    # Wire spawn tool's background handler to the agent loop
+    spawn = agent.tools.get("spawn")
+    if spawn and hasattr(spawn, "set_background_handler"):
+        spawn.set_background_handler(loop.process_direct)
+
     if message:
         # One-shot mode
         response = await loop.process_direct(message)
         console.print(response)
         return
 
-    # Interactive mode
+    # Interactive mode — enable streaming so tokens appear as they arrive
+    import sys
+
+    def _stream_to_console(chunk: str) -> None:
+        sys.stdout.write(chunk)
+        sys.stdout.flush()
+
+    loop.set_stream_callback(_stream_to_console)
+
     console.print(f"[bold]pyclaw[/bold] (model: {model_name})")
     console.print("Type your message. Use Ctrl+D or 'exit' to quit.\n")
 
@@ -78,8 +92,13 @@ async def run_agent(
             _handle_slash(user_input, agent)
             continue
 
+        sys.stdout.write(f"\n\033[32m{agent.name}>\033[0m ")
         response = await loop.process_direct(user_input)
-        console.print(f"\n[green]{agent.name}>[/green] {response}\n")
+        # If streaming was used, text was already printed; otherwise print it
+        if not response or response == "(max iterations reached)":
+            pass  # Already streamed or nothing to print
+        sys.stdout.write("\n\n")
+        sys.stdout.flush()
 
 
 def _register_tools(agent: AgentInstance, cfg: "Config") -> None:
@@ -102,6 +121,33 @@ def _register_tools(agent: AgentInstance, cfg: "Config") -> None:
         brave_api_key=cfg.tools.web.brave.api_key,
         tavily_api_key=cfg.tools.web.tavily.api_key,
     ))
+
+    # Spawn tool
+    spawn_tool = SpawnTool()
+    agent.tools.register(spawn_tool)
+
+    # Skill tools
+    from pyclaw.skills.clawhub import ClawHubConfig, ClawHubRegistry
+    from pyclaw.skills.creator import CreateSkillTool
+    from pyclaw.skills.registry import RegistryManager
+    from pyclaw.skills.search_cache import SearchCache
+    from pyclaw.tools.skills_tools import FindSkillsTool, InstallSkillTool
+
+    registry_mgr = RegistryManager()
+    if cfg.tools.skills.hub_url:
+        hub_cfg = ClawHubConfig(
+            base_url=cfg.tools.skills.hub_url,
+            auth_token=cfg.tools.skills.hub_auth_token,
+        )
+        registry_mgr.add_registry(ClawHubRegistry(hub_cfg))
+
+    find_tool = FindSkillsTool(registry_mgr, SearchCache())
+    install_tool = InstallSkillTool(ws, registry_mgr)
+    create_tool = CreateSkillTool(ws, agent.skills_loader)
+
+    agent.tools.register(find_tool)
+    agent.tools.register(install_tool)
+    agent.tools.register(create_tool)
 
     agent.context_builder.set_tools_registry(agent.tools)
 

@@ -128,10 +128,17 @@ class SlackConfig(BaseModel):
     allow_from: list[str] = Field(default_factory=list)
 
 
+class WhatsAppConfig(BaseModel):
+    enabled: bool = False
+    bridge_url: str = ""
+    allow_from: list[str] = Field(default_factory=list)
+
+
 class ChannelsConfig(BaseModel):
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
     slack: SlackConfig = Field(default_factory=SlackConfig)
+    whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)
 
 
 class BraveConfig(BaseModel):
@@ -163,6 +170,8 @@ class CronToolsConfig(BaseModel):
 
 class SkillsToolsConfig(BaseModel):
     hub_url: str = ""
+    hub_auth_token: str = ""
+    github_enabled: bool = True
 
 
 class ToolsConfig(BaseModel):
@@ -187,9 +196,22 @@ class DevicesConfig(BaseModel):
     monitor_usb: bool = False
 
 
+class UserConfig(BaseModel):
+    """Persisted user identity for onboarding re-runs."""
+
+    name: str = ""
+    role: str = ""
+    address_as: str = ""
+    agent_name: str = ""
+    personality: str = ""
+    use_case: str = ""
+    extra_instructions: str = ""
+
+
 class Config(BaseModel):
     """Root configuration model for pyclaw."""
 
+    user: UserConfig = Field(default_factory=UserConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     bindings: list[AgentBinding] = Field(default_factory=list)
     session: SessionConfig = Field(default_factory=SessionConfig)

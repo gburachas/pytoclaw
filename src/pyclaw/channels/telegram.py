@@ -459,7 +459,7 @@ class TelegramChannel(BaseChannel):
     # ── commands -----------------------------------------------------------
 
     async def _cmd_start(self, update: Any, context: Any) -> None:
-        await update.message.reply_text("Hello! I am PicoClaw \U0001f99e")
+        await update.message.reply_text("Hello! I am PyClaw Bro \U0001f99e")
 
     async def _cmd_help(self, update: Any, context: Any) -> None:
         help_text = (

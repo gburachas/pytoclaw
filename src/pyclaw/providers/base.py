@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from pyclaw.models import LLMResponse, Message, ToolDefinition
 from pyclaw.protocols import LLMProvider
@@ -31,3 +31,14 @@ class BaseProvider(LLMProvider):
         options: dict[str, Any] | None = None,
     ) -> LLMResponse:
         raise NotImplementedError
+
+    async def stream_chat(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition],
+        model: str,
+        options: dict[str, Any] | None = None,
+        on_chunk: Callable[[str], Any] | None = None,
+    ) -> LLMResponse:
+        """Streaming chat with incremental output. Default: falls back to non-streaming."""
+        return await self.chat(messages, tools, model, options)

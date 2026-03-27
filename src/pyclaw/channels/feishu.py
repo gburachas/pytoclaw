@@ -1,8 +1,7 @@
-"""Feishu (Lark) channel adapter."""
+"""Feishu (Lark) channel adapter — not yet implemented."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -12,25 +11,27 @@ from pyclaw.models import OutboundMessage
 
 logger = logging.getLogger(__name__)
 
+_NOT_IMPLEMENTED_MSG = (
+    "Feishu channel is not yet fully implemented. "
+    "Incoming messages will not be received. "
+    "See https://github.com/gburachas/pyclaw/issues for status."
+)
+
 
 class FeishuChannel(BaseChannel):
-    """Feishu/Lark bot channel via WebSocket SDK."""
+    """Feishu/Lark bot channel — stub awaiting SDK integration."""
 
     def __init__(self, config: Any, bus: MessageBus):
         super().__init__("feishu", config, bus, getattr(config, "allow_from", []))
         self._app_id = getattr(config, "app_id", "")
         self._app_secret = getattr(config, "app_secret", "")
-        self._task: asyncio.Task | None = None
 
     async def start(self) -> None:
-        # Feishu Lark SDK integration
+        logger.warning(_NOT_IMPLEMENTED_MSG)
         self._running = True
-        logger.info("Feishu channel started (app_id: %s...)", self._app_id[:8] if self._app_id else "?")
 
     async def stop(self) -> None:
         self._running = False
-        if self._task:
-            self._task.cancel()
 
     async def send(self, msg: OutboundMessage) -> None:
-        logger.info("Feishu send to %s: %s", msg.chat_id, msg.content[:50])
+        logger.warning("Feishu send not implemented — message dropped: %s", msg.content[:50])

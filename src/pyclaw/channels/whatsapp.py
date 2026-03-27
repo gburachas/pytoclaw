@@ -14,17 +14,12 @@ from pyclaw.models import OutboundMessage
 logger = logging.getLogger(__name__)
 
 
-class WhatsAppConfig:
-    def __init__(self, bridge_url: str = "", allow_from: list[str] | None = None):
-        self.bridge_url = bridge_url
-        self.allow_from = allow_from or []
-
-
 class WhatsAppChannel(BaseChannel):
     """WhatsApp channel via WebSocket bridge."""
 
-    def __init__(self, config: WhatsAppConfig, bus: MessageBus):
-        super().__init__("whatsapp", config, bus, config.allow_from)
+    def __init__(self, config: Any, bus: MessageBus):
+        allow_from = getattr(config, "allow_from", []) or []
+        super().__init__("whatsapp", config, bus, allow_from)
         self._url = config.bridge_url
         self._ws: Any = None
         self._task: asyncio.Task | None = None

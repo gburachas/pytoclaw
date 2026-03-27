@@ -6,7 +6,8 @@ import json
 import pytest
 
 from pyclaw.bus.message_bus import MessageBus
-from pyclaw.channels.whatsapp import WhatsAppChannel, WhatsAppConfig
+from pyclaw.channels.whatsapp import WhatsAppChannel
+from pyclaw.config.models import WhatsAppConfig
 
 
 @pytest.fixture
@@ -16,7 +17,7 @@ def bus():
 
 @pytest.fixture
 def config():
-    return WhatsAppConfig(bridge_url="ws://localhost:9999")
+    return WhatsAppConfig(enabled=True, bridge_url="ws://localhost:9999")
 
 
 # ---------------------------------------------------------------------------
